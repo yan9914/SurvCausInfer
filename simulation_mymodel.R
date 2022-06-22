@@ -4,9 +4,9 @@ library(dplyr)
 library(tibble)
 
 digit <- 10
-`%==%` <- function(a, b) near(a, b, 10^-digit)
-`%^%` <- function(a, b) exp(b*log(a))
-`%/%` <- function(a, b) ifelse(is.nan(a/b), 0, a/b)
+# `%==%` <- function(a, b) near(a, b, 10^-digit)
+# `%^%` <- function(a, b) exp(b*log(a))
+# `%/%` <- function(a, b) ifelse(is.nan(a/b), 0, a/b)
 
 lambda <- 1e-9
 shape <- 5
@@ -111,7 +111,7 @@ gn <- function(par) {
 # }
 
 
-opt <- optimx(c(lambda = 0, p1 = 0, alpha = 0, p2 = 0, b1 = 0, b2 = 0), ll, gn, hessian = TRUE, control = list(trace = 0, all.methods = TRUE))
+opt <- optimx(c(lambda = 0, p1 = 0, alpha = 0, p2 = 0, b1 = 0, b2 = 0), ll, hessian = TRUE, control = list(trace = 0, all.methods = TRUE))
 
 summary(opt, order = "value") %>%
   rownames_to_column("algorithm") %>%
@@ -206,3 +206,70 @@ f <- function(i) {
 }
 tmp <- sapply(1:100, f)
 apply(tmp, 1, \(x) mean(x, na.rm = TRUE))
+
+
+### customize function
+
+df <- data.frame(
+  y = rnorm(5),
+  x1 = rnorm(5),
+  x2 = rnorm(5),
+  x3 = rnorm(5),
+  x4 = rnorm(5),
+  status = c(1,1,0,0,0)
+)
+
+mymodel <- function(formula, data, time.scales, opt.method = NULL) {
+  Call <- match.call()
+  indx <- match(c("formula", "data"), names(Call), 0L)
+  temp <- Call[c(1L, indx)]
+  temp$drop.unused.levels <- TRUE
+  temp[[1L]] <- quote(stats::model.frame)
+  temp$formula <- terms(formula, data = data)
+  m <- eval(temp, parent.frame())
+  Terms <- attr(m, "terms")
+  Y <- model.extract(m, "response")
+  X <- model.matrix(Terms, m) %>% data.frame() %>% select(-1)
+  ts <- data[,time.scales] %>% as.data.frame()
+  colnames(ts) <- sapply(seq_along(time.scales), \(i) paste0("ts.", time.scales[[i]]))
+  n.ts <- ncol(ts) + 1
+  n.x <- ncol(X)
+  n.par <- 2 * n.ts + n.x * n.ts
+  ll <- function(par) {
+    new_par <- par
+    new_par[c(seq(1, by = 2+n.x, len = n.ts), seq(2, by = 2+n.x, len = n.ts))] <- exp(par[c(seq(1, by = 2+n.x, len = n.ts), seq(2, by = 2+n.x, len = n.ts))]) # weibull parameter
+    
+    tmp1 <- new_par[1] * new_par[2] * Y[Y[,2] == 1,1] ^ (new_par[2] - 1) * exp(t(t(X[Y[,2] == 1,])) %*% new_par[2+1:n.x])
+    tmp2 <- -new_par[1] * sum(Y[,1] ^ new_par[2] * exp(t(t(X)) %*% new_par[2+1:n.x]))
+    for(i in 1:(n.ts-1)) {
+      tmp1 <- tmp1 + new_par[1 + (2+n.x)*i] * new_par[2 + (2+n.x)*i] * (Y[Y[,2] == 1,1] + ts[Y[,2] == 1,i]) ^ (new_par[2 + (2+n.x)*i] - 1) * exp(t(t(X[Y[,2] == 1,])) %*% new_par[2+1:n.x+(2+n.x)*i])
+      tmp2 <- tmp2 - new_par[1 + (2+n.x)*i] * sum(((Y[,1] + ts[,i])^new_par[2 + (2+n.x)*i]-ts[,i]^new_par[2 + (2+n.x)*i]) * exp(t(t(X)) %*% new_par[2+1:n.x+(2+n.x)*i]))
+    }
+    return(-sum(log(tmp1))-tmp2)
+  }
+  par <- rep(0, n.par)
+  names(par) <- c(c("ts.prime.lambda", "ts.prime.p", sapply(1:n.x, \(j) paste0("ts.prime.", colnames(X)[j]))), sapply(2:n.ts, \(i) c(paste0(colnames(ts)[i-1], ".", "lambda"), paste0(colnames(ts)[i-1], ".", "p"), sapply(1:n.x, \(j) paste0(colnames(ts)[i-1], ".", colnames(X)[j])))))
+  if(is.null(opt.method)) {
+    opt <- optimx(par, ll, hessian = TRUE, control = list(trace = 0, all.methods = TRUE))
+    
+    summary(opt, order = "value") %>%
+      rownames_to_column("algorithm") %>%
+      filter(convcode != 9999) %>%
+      arrange(value) %>%
+      select(algorithm, names(par), value, convcode) %>%
+      mutate(across(ends_with(c(".lambda", ".p")), exp)) %>%
+      head(7)
+  } else {
+    if(!any(opt.method %in% c('Nelder-Mead', 'BFGS', 'CG', 'L-BFGS-B', 'nlm', 'nlminb', 'spg', 'ucminf', 'newuoa', 'bobyqa', 'nmkb', 'hjkb', 'Rcgmin', 'Rvmmin'))) {
+      stop("Not available method. Possible method codes at the time of writing are 'Nelder-Mead', 'BFGS', 'CG', 'L-BFGS-B', 'nlm', 'nlminb', 'spg', 'ucminf', 'newuoa', 'bobyqa', 'nmkb', 'hjkb', 'Rcgmin', or 'Rvmmin'.")
+    }
+    opt <- optimx(par, ll, method = opt.method, hessian = TRUE, control = list(trace = 0))
+    summary(opt, order = "value") %>%
+      rownames_to_column("algorithm") %>%
+      arrange(value) %>%
+      select(algorithm, names(par), value, convcode) %>%
+      mutate(across(ends_with(c(".lambda", ".p")), exp))
+  }
+}
+
+mymodel(cbind(time, status) ~ x, time.scales = "age", data = data)
